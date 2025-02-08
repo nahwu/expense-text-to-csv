@@ -3,6 +3,7 @@ import re
 import os
 import logging
 from logging.handlers import RotatingFileHandler
+from decimal import Decimal, ROUND_UP
 
 SETTING_LOG_LEVEL = os.environ.get('SETTING_LOG_LEVEL', "INFO")
 
@@ -73,7 +74,7 @@ def categorize_description(raw_desc):
     0. treat + personal if "for X" in desc
     1. child:            if "child" in desc
     2. Dad:             if "dad" in desc
-    3. Household:       if "hougang", "utilities", "internet" in desc
+    3. Household:       if "hougang", "utilities", "internet", "household" in desc
     4. Gift/Treats:     if "gift", "treat" in desc
     5. Food:            if "lunch", "dinner", "breakfast"
     6. Transport:       if "taxi", "grab", "bus", "mrt"
@@ -90,7 +91,7 @@ def categorize_description(raw_desc):
     if "dad" in description_lowered:
         return ("Dad", "Dad")
     # 3. Household
-    if any(x in description_lowered for x in ["hougang", "utilities", "internet"]):
+    if any(x in description_lowered for x in ["hougang", "utilities", "internet", "household"]):
         if "internet" in description_lowered:
             return ("Household", "Starhub")
         else:
@@ -111,7 +112,7 @@ def categorize_description(raw_desc):
     if any(x in description_lowered for x in ["mobile", "bill", "chatgpt"]):
         return ("Bills", "")
     # 9. Leisure
-    if any(x in description_lowered for x in ["snacks", "drinks"]):
+    if any(x in description_lowered for x in ["snack", "snacks", "drink", "drinks"]):
         return ("Leisure", "")
     # 10. Others
     return ("Others", "")
@@ -171,13 +172,16 @@ def parse_raw_data(raw_text):
         if m_amt:
             amt_str, description = m_amt.groups()
             try:
-                amount = float(amt_str)
+                amount = Decimal(str(amt_str))  # Ensures precision and avoids float conversion issues
             except ValueError:
-                logging.error('Failed to parse amount value to float type')
+                logging.error(f'______________Failed to parse amount value to float type - {current_date}')
+                continue  # skip lines that don't parse correctly
+            except Exception:
+                logging.error(f'______________Failed to parse amount value to float type. Unexpected Error - {current_date}')
                 continue  # skip lines that don't parse correctly
             
             if not current_date:
-                logging.error('Failed to register transaction to a date')
+                logging.error('______________Failed to register transaction to a date')
                 # If no current date is set, skip or handle error
                 continue
             
@@ -185,14 +189,16 @@ def parse_raw_data(raw_text):
             # We'll look for: "for <number>"
             # e.g. "lunch for 2"
             # We'll capture that number if present
-            multiple_pax_match = re.search(r"\bfor\s+(\d+)\b", description.lower())
+            multiple_pax_match = re.search(r"\b(dinner|lunch|breakfast|brunch|supper|dessert)\s+for\s+(\d+)\b", description.lower())
             if multiple_pax_match:
-                logging.debug('Found transaction to split')
+                logging.info(f'Found transaction to split - {description} - {current_date}')
                 transactions_split_count += 1
                 # We have a split scenario
-                total_pax_number = int(multiple_pax_match.group(1))
-                personal_portion = round(amount * (1/total_pax_number), 2)
-                treat_portion = round(amount * ((total_pax_number-1)/total_pax_number), 2)
+                total_pax_number = int(multiple_pax_match.group(2))
+                # Compute the personal portion without rounding
+                personal_portion = (amount / total_pax_number).quantize(Decimal("0.01"), rounding=ROUND_UP)
+                # Compute treat portion as the remainder to ensure it sums to the total
+                treat_portion = amount - personal_portion
 
                 treat_category = "Gift/Treats"
                 if "child" in description.lower() and total_pax_number == 2:
@@ -224,6 +230,8 @@ def parse_raw_data(raw_text):
                     "outflow": amount,
                     "payee": payee
                 })
+                if category.lower() == 'others':
+                    logging.info(f'{current_date} - {category} - {description} - {amount}')
     return processed_transactions, dates_found_count, transactions_split_count
 
 def generate_csv(transactions, output_filename):
